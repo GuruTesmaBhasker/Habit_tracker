@@ -490,22 +490,64 @@ const Tracker = ({ user }) => {
     <div className="min-h-screen bg-slate-50 p-4 md:p-8 text-slate-900 font-sans">
       <div className="max-w-[1400px] mx-auto space-y-6">
         
-        {/* Enhanced Header with Analytics Toggle */}
-        <header className="flex flex-col md:flex-row md:items-center justify-between gap-4 bg-white p-6 rounded-2xl shadow-sm border border-slate-100">
-          <div>
-            <h1 className="text-2xl font-bold text-slate-800 tracking-tight">Habit & Task Master</h1>
-            <p className="text-slate-500 text-sm">
-              {isLoading 
-                ? 'Loading your progress...' 
-                : activeView === 'habits' 
-                  ? 'Logging progress for the full month grid.' 
-                  : 'Deep insights into your habit journey'
-              }
-            </p>
+        {/* Enhanced Header with Mobile-First Layout */}
+        <header className="bg-white rounded-2xl shadow-sm border border-slate-100 overflow-hidden">
+          {/* Mobile Layout: App Title/Description on Left, Email/Streak on Right */}
+          <div className="flex items-start justify-between p-6 gap-4">
+            {/* Left Side: App Title + Description in Mobile-friendly Box */}
+            <div className="flex-1 min-w-0">
+              <div className="bg-slate-50 p-4 rounded-xl border border-slate-100">
+                <h1 className="text-xl font-bold text-slate-800 tracking-tight">Habit & Task Master</h1>
+                <p className="text-slate-500 text-sm mt-1">
+                  {isLoading 
+                    ? 'Loading your progress...' 
+                    : activeView === 'habits' 
+                      ? 'Track daily habits with ease' 
+                      : 'Deep insights into your habit journey'
+                  }
+                </p>
+              </div>
+            </div>
+            
+            {/* Right Side: Email + Streak Stack */}
+            <div className="flex flex-col items-end gap-2 flex-shrink-0">
+              {/* Email */}
+              <div className="text-right">
+                <p className="text-sm font-semibold text-slate-700">{user.email}</p>
+                <div className="flex items-center justify-end gap-1 mt-1">
+                  {pendingUpdates.size > 0 && (
+                    <div className="flex items-center gap-1 text-xs text-orange-600">
+                      <LoadingSpinner size="small" />
+                      <span>Syncing...</span>
+                    </div>
+                  )}
+                  <div className={`w-2 h-2 rounded-full ${isOnline ? 'bg-green-500' : 'bg-red-500'}`} />
+                </div>
+              </div>
+              
+              {/* Streak */}
+              {habits.length > 0 && (
+                <div className="bg-gradient-to-r from-orange-50 to-red-50 border border-orange-200 rounded-lg p-3 text-right">
+                  <p className="text-xs text-orange-600 font-bold">
+                    🔥 <AnimatedCounter value={currentStreak} /> day{currentStreak !== 1 ? 's' : ''} streak
+                  </p>
+                </div>
+              )}
+              
+              {/* Logout Button */}
+              <Button 
+                onClick={handleLogout}
+                variant="secondary"
+                size="small"
+                className="p-2"
+              >
+                <LogOut className="w-4 h-4" />
+              </Button>
+            </div>
           </div>
           
-          <div className="flex items-center gap-4">
-            {/* View Toggle */}
+          {/* Desktop View Toggle + Notifications (Below on Mobile) */}
+          <div className="border-t border-slate-100 p-4 flex flex-wrap items-center justify-between gap-3">
             <div className="bg-slate-100 p-1 rounded-lg flex">
               <button
                 onClick={() => setActiveView('habits')}
@@ -528,44 +570,8 @@ const Tracker = ({ user }) => {
                 Analytics
               </button>
             </div>
-
-            {/* Enhanced Streak Display */}
-            {habits.length > 0 && (
-              <Card className="p-4 bg-gradient-to-r from-orange-50 to-red-50 border-orange-200" hover>
-                <p className="text-xs uppercase text-orange-600 font-bold tracking-widest">
-                  Current Streak
-                </p>
-                <p className="text-2xl font-black text-orange-500 flex items-center gap-1">
-                  🔥 <AnimatedCounter value={currentStreak} /> day{currentStreak !== 1 ? 's' : ''}
-                </p>
-              </Card>
-            )}
             
-            <div className="flex items-center gap-3">
-              <Notifications habits={habits} />
-              
-              <div className="text-right">
-                <p className="text-sm font-semibold text-slate-700">{user.email}</p>
-                <div className="flex items-center justify-end gap-1 mt-1">
-                  {pendingUpdates.size > 0 && (
-                    <div className="flex items-center gap-1 text-xs text-orange-600">
-                      <LoadingSpinner size="small" />
-                      <span>Syncing...</span>
-                    </div>
-                  )}
-                  <div className={`w-2 h-2 rounded-full ${isOnline ? 'bg-green-500' : 'bg-red-500'}`} />
-                </div>
-              </div>
-              
-              <Button 
-                onClick={handleLogout}
-                variant="secondary"
-                size="small"
-                className="p-2"
-              >
-                <LogOut className="w-5 h-5" />
-              </Button>
-            </div>
+            <Notifications habits={habits} />
           </div>
         </header>
 
