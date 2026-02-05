@@ -1,5 +1,11 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useCallback } from 'react';
+import { Routes, Route } from 'react-router-dom';
 import { supabase, fetchHabits, addHabit as dbAddHabit, toggleHabit as dbToggleHabit, deleteHabit as dbDeleteHabit, fetchTodos, addTodo as dbAddTodo, toggleTodo as dbToggleTodo, deleteTodo as dbDeleteTodo, fetchHabitLogs, checkHabit, uncheckHabit, fetchDailyCounts } from './lib/supabase';
+import { realtimeManager, optimisticUpdates, dataCache, connectionMonitor } from './lib/realtime';
+import Analytics from './components/Analytics';
+import Notifications from './components/Notifications';
+import ResetPassword from './components/ResetPassword';
+import { ConnectionStatus, ToastContainer, Button, LoadingSpinner, Card, ProgressBar, AnimatedCounter } from './components/UI';
 import Auth from './Auth';
 import { 
   CheckCircle2, 
@@ -14,16 +20,17 @@ import {
   Check,
   LogOut
 } from 'lucide-react';
-import { 
-  Chart as ChartJS, 
-  CategoryScale, 
-  LinearScale, 
-  PointElement, 
-  LineElement, 
-  Title, 
-  Tooltip, 
-  Legend, 
+import {
+  Chart as ChartJS,
+  CategoryScale,
+  LinearScale,
+  PointElement,
+  LineElement,
+  BarElement,
   ArcElement,
+  Title,
+  Tooltip,
+  Legend,
   Filler
 } from 'chart.js';
 import { Line, Pie } from 'react-chartjs-2';
@@ -34,6 +41,7 @@ ChartJS.register(
   LinearScale,
   PointElement,
   LineElement,
+  BarElement,
   ArcElement,
   Title,
   Tooltip,
@@ -49,41 +57,141 @@ const Tracker = ({ user }) => {
   const [habitLogs, setHabitLogs] = useState([]);
   const [newHabitName, setNewHabitName] = useState('');
   const [newTaskName, setNewTaskName] = useState('');
+  const [isOnline, setIsOnline] = useState(connectionMonitor.getStatus());
+  const [isLoading, setIsLoading] = useState(true);
+  const [activeView, setActiveView] = useState('habits'); // 'habits', 'analytics'
+  const [pendingUpdates, setPendingUpdates] = useState(new Set());
 
-  // --- Data Loading ---
+  // --- Realtime Setup ---
   useEffect(() => {
     if (!user) return;
-    loadData();
-  }, [user, currentMonth]);
 
-  const loadData = async () => {
+    const unsubscribeConnection = connectionMonitor.subscribe(setIsOnline);
+
+    const unsubscribeHabits = realtimeManager.subscribeToHabits((payload) => {
+      switch (payload.eventType) {
+        case 'INSERT':
+          setHabits(prev => [...prev, payload.new]);
+          if (window.showToast) window.showToast('Habit synced across devices', 'success');
+          break;
+        case 'UPDATE':
+          setHabits(prev => prev.map(h => h.id === payload.new.id ? payload.new : h));
+          break;
+        case 'DELETE':
+          setHabits(prev => prev.filter(h => h.id !== payload.old.id));
+          if (window.showToast) window.showToast('Habit deleted on another device', 'info');
+          break;
+      }
+    }, user.id);
+
+    const unsubscribeHabitLogs = realtimeManager.subscribeToHabitLogs((payload) => {
+      switch (payload.eventType) {
+        case 'INSERT':
+          setHabitLogs(prev => [...prev, payload.new]);
+          break;
+        case 'DELETE':
+          setHabitLogs(prev => prev.filter(log => 
+            !(log.habit_id === payload.old.habit_id && log.log_date === payload.old.log_date)
+          ));
+          break;
+      }
+    }, user.id);
+
+    const unsubscribeTodos = realtimeManager.subscribeToTodos((payload) => {
+      switch (payload.eventType) {
+        case 'INSERT':
+          setTasks(prev => [...prev, {
+            ...payload.new,
+            name: payload.new.title || payload.new.name || ''
+          }]);
+          break;
+        case 'UPDATE':
+          setTasks(prev => prev.map(t => t.id === payload.new.id ? {
+            ...payload.new,
+            name: payload.new.title || payload.new.name || ''
+          } : t));
+          break;
+        case 'DELETE':
+          setTasks(prev => prev.filter(t => t.id !== payload.old.id));
+          break;
+      }
+    }, user.id);
+
+    return () => {
+      unsubscribeConnection();
+      unsubscribeHabits();
+      unsubscribeHabitLogs();
+      unsubscribeTodos();
+    };
+  }, [user]);
+
+  // --- Data Loading with Caching ---
+  const loadData = useCallback(async () => {
+    if (!user) return;
+    
+    setIsLoading(true);
     try {
       const [year, month] = currentMonth.split('-').map(Number);
       const monthStart = `${year}-${month.toString().padStart(2, '0')}-01`;
       const lastDay = new Date(year, month, 0).getDate();
       const monthEnd = `${year}-${month.toString().padStart(2, '0')}-${lastDay.toString().padStart(2, '0')}`;
       
+      const cacheKey = `data-${user.id}-${currentMonth}`;
+      const cachedData = dataCache.get(cacheKey);
+      
+      if (cachedData && isOnline) {
+        setHabits(cachedData.habits || []);
+        setTasks(cachedData.tasks || []);
+        setHabitLogs(cachedData.habitLogs || []);
+        setIsLoading(false);
+        return;
+      }
+      
       const [habitsData, tasksData, habitLogsData] = await Promise.all([
         fetchHabits(),
         fetchTodos(),
         fetchHabitLogs(monthStart, monthEnd)
       ]);
-      setHabits(habitsData || []);
-      setHabitLogs(habitLogsData || []);
-      // Map database fields to UI fields for tasks
+      
+      const processedHabits = habitsData || [];
+      const processedHabitLogs = habitLogsData || [];
       const mappedTasks = (tasksData || []).map(task => ({
         ...task,
         name: task.title || task.name || ''
       }));
+      
+      setHabits(processedHabits);
+      setHabitLogs(processedHabitLogs);
       setTasks(mappedTasks);
+      
+      dataCache.set(cacheKey, {
+        habits: processedHabits,
+        tasks: mappedTasks,
+        habitLogs: processedHabitLogs
+      });
+      
+      if (window.showToast && !cachedData) {
+        window.showToast('Data loaded successfully', 'success');
+      }
     } catch (error) {
       console.error('Error loading data:', error);
-      // Set empty arrays on error
+      if (window.showToast) {
+        window.showToast(
+          isOnline ? 'Failed to load data. Please try again.' : 'Offline - using cached data',
+          isOnline ? 'error' : 'warning'
+        );
+      }
       setHabits([]);
       setTasks([]);
       setHabitLogs([]);
+    } finally {
+      setIsLoading(false);
     }
-  };
+  }, [user, currentMonth, isOnline]);
+
+  useEffect(() => {
+    loadData();
+  }, [loadData]);
 
   const handleLogout = async () => {
     await supabase.auth.signOut();
@@ -100,15 +208,27 @@ const Tracker = ({ user }) => {
     return Array.from({ length: count }, (_, i) => i + 1);
   }, [currentMonth]);
 
-  // --- Action Handlers ---
+  // --- Enhanced Action Handlers ---
   const addHabit = async () => {
     if (!newHabitName.trim()) return;
+    
+    const tempId = `temp-${Date.now()}`;
+    const tempHabit = { id: tempId, name: newHabitName, user_id: user.id };
+    
+    setHabits(prev => [...prev, tempHabit]);
+    setPendingUpdates(prev => new Set([...prev, tempId]));
+    
     try {
       const newHabit = await dbAddHabit(newHabitName);
-      setHabits([...(habits || []), newHabit]);
+      setHabits(prev => prev.map(h => h.id === tempId ? newHabit : h));
       setNewHabitName('');
+      if (window.showToast) window.showToast('Habit added successfully', 'success');
     } catch (error) {
       console.error('Error adding habit:', error);
+      setHabits(prev => prev.filter(h => h.id !== tempId));
+      if (window.showToast) window.showToast('Failed to add habit', 'error');
+    } finally {
+      setPendingUpdates(prev => { const next = new Set(prev); next.delete(tempId); return next; });
     }
   };
 
@@ -116,94 +236,128 @@ const Tracker = ({ user }) => {
     const [year, month] = currentMonth.split('-').map(Number);
     const logDate = `${year}-${month.toString().padStart(2, '0')}-${day.toString().padStart(2, '0')}`;
     
-    // Check if log exists
     const existingLog = habitLogs.find(log => 
       log.habit_id === habitId && log.log_date === logDate
     );
     
+    const updateKey = `${habitId}-${logDate}`;
+    setPendingUpdates(prev => new Set([...prev, updateKey]));
+    
     if (existingLog) {
-      // OPTIMISTIC UPDATE: Remove from UI immediately
-      setHabitLogs(habitLogs.filter(log => 
+      setHabitLogs(prev => prev.filter(log => 
         !(log.habit_id === habitId && log.log_date === logDate)
       ));
       
-      // Sync with database in background
       try {
         await uncheckHabit(habitId, logDate);
       } catch (error) {
         console.error('Error unchecking habit:', error);
-        // Revert UI on error
-        setHabitLogs([...habitLogs, { habit_id: habitId, log_date: logDate }]);
+        setHabitLogs(prev => [...prev, { habit_id: habitId, log_date: logDate }]);
+        if (window.showToast) window.showToast('Failed to uncheck habit', 'error');
       }
     } else {
-      // OPTIMISTIC UPDATE: Add to UI immediately
-      setHabitLogs([...habitLogs, { habit_id: habitId, log_date: logDate }]);
+      setHabitLogs(prev => [...prev, { habit_id: habitId, log_date: logDate }]);
       
-      // Sync with database in background
       try {
         await checkHabit(habitId, logDate);
       } catch (error) {
         console.error('Error checking habit:', error);
-        // Revert UI on error
-        setHabitLogs(habitLogs.filter(log => 
+        setHabitLogs(prev => prev.filter(log => 
           !(log.habit_id === habitId && log.log_date === logDate)
         ));
+        if (window.showToast) window.showToast('Failed to check habit', 'error');
       }
     }
+    
+    setPendingUpdates(prev => { const next = new Set(prev); next.delete(updateKey); return next; });
   };
 
   const deleteHabit = async (id) => {
+    const habitToDelete = habits.find(h => h.id === id);
+    if (!habitToDelete) return;
+    
+    setHabits(prev => prev.filter(h => h.id !== id));
+    setPendingUpdates(prev => new Set([...prev, `delete-${id}`]));
+    
     try {
       await dbDeleteHabit(id);
-      setHabits((habits || []).filter(h => h && h.id !== id));
+      if (window.showToast) window.showToast('Habit deleted', 'success');
     } catch (error) {
       console.error('Error deleting habit:', error);
+      setHabits(prev => [...prev, habitToDelete]);
+      if (window.showToast) window.showToast('Failed to delete habit', 'error');
+    } finally {
+      setPendingUpdates(prev => { const next = new Set(prev); next.delete(`delete-${id}`); return next; });
     }
   };
 
   const addTask = async () => {
     if (!newTaskName.trim()) return;
+    
+    const tempId = `temp-task-${Date.now()}`;
+    const tempTask = { id: tempId, name: newTaskName, title: newTaskName, completed: false };
+    
+    setTasks(prev => [...prev, tempTask]);
+    setPendingUpdates(prev => new Set([...prev, tempId]));
+    
     try {
       const newTask = await dbAddTodo(newTaskName);
-      // Map database fields to UI fields
-      const taskForUI = {
-        ...newTask,
-        name: newTask.title || newTask.name || newTaskName
-      };
-      setTasks([...(tasks || []), taskForUI]);
+      const taskForUI = { ...newTask, name: newTask.title || newTask.name || newTaskName };
+      setTasks(prev => prev.map(t => t.id === tempId ? taskForUI : t));
       setNewTaskName('');
+      if (window.showToast) window.showToast('Task added successfully', 'success');
     } catch (error) {
       console.error('Error adding task:', error);
-      // Fallback: add locally if database fails
-      const fallbackTask = {
-        id: Date.now(),
-        name: newTaskName,
-        title: newTaskName,
-        completed: false
-      };
-      setTasks([...(tasks || []), fallbackTask]);
-      setNewTaskName('');
+      if (isOnline) {
+        setTasks(prev => prev.filter(t => t.id !== tempId));
+        if (window.showToast) window.showToast('Failed to add task', 'error');
+      } else {
+        if (window.showToast) window.showToast('Task saved locally - will sync when online', 'info');
+        setNewTaskName('');
+      }
+    } finally {
+      setPendingUpdates(prev => { const next = new Set(prev); next.delete(tempId); return next; });
     }
   };
 
   const toggleTask = async (id) => {
+    const task = tasks.find(t => t.id === id);
+    if (!task) return;
+    
+    setTasks(prev => prev.map(t => 
+      t.id === id ? { ...t, completed: !t.completed } : t
+    ));
+    setPendingUpdates(prev => new Set([...prev, `task-${id}`]));
+    
     try {
-      const task = (tasks || []).find(t => t && t.id === id);
-      if (task) {
-        await dbToggleTodo(id, task.completed);
-        setTasks((tasks || []).map(t => t && t.id === id ? { ...t, completed: !t.completed } : t));
-      }
+      await dbToggleTodo(id, task.completed);
     } catch (error) {
       console.error('Error toggling task:', error);
+      setTasks(prev => prev.map(t => 
+        t.id === id ? { ...t, completed: !t.completed } : t
+      ));
+      if (window.showToast) window.showToast('Failed to update task', 'error');
+    } finally {
+      setPendingUpdates(prev => { const next = new Set(prev); next.delete(`task-${id}`); return next; });
     }
   };
 
   const deleteTask = async (id) => {
+    const taskToDelete = tasks.find(t => t.id === id);
+    if (!taskToDelete) return;
+    
+    setTasks(prev => prev.filter(t => t.id !== id));
+    setPendingUpdates(prev => new Set([...prev, `delete-task-${id}`]));
+    
     try {
       await dbDeleteTodo(id);
-      setTasks((tasks || []).filter(t => t && t.id !== id));
+      if (window.showToast) window.showToast('Task deleted', 'success');
     } catch (error) {
       console.error('Error deleting task:', error);
+      setTasks(prev => [...prev, taskToDelete]);
+      if (window.showToast) window.showToast('Failed to delete task', 'error');
+    } finally {
+      setPendingUpdates(prev => { const next = new Set(prev); next.delete(`delete-task-${id}`); return next; });
     }
   };
 
@@ -220,6 +374,58 @@ const Tracker = ({ user }) => {
     const logDate = `${year}-${month.toString().padStart(2, '0')}-${day.toString().padStart(2, '0')}`;
     return habitLogs.some(log => log.habit_id === habitId && log.log_date === logDate);
   };
+
+  // ✅ STEP 1 — Compute Perfect Days From Existing Data
+  const perfectDaysSet = useMemo(() => {
+    if (!habits.length) return new Set();
+
+    // Group logs by date
+    const logsByDate = {};
+
+    habitLogs.forEach(log => {
+      if (!logsByDate[log.log_date]) {
+        logsByDate[log.log_date] = new Set();
+      }
+      logsByDate[log.log_date].add(log.habit_id);
+    });
+
+    const perfectDays = new Set();
+
+    Object.entries(logsByDate).forEach(([date, habitIds]) => {
+      if (habitIds.size === habits.length) {
+        perfectDays.add(date);
+      }
+    });
+
+    return perfectDays;
+  }, [habitLogs, habits]);
+
+  // ✅ STEP 2 — Optimized Streak Calculation (No Extra Queries)
+  const currentStreak = useMemo(() => {
+    if (!perfectDaysSet.size) return 0;
+
+    let streak = 0;
+    let today = new Date();
+
+    // OPTIONAL: if today not perfect, start from yesterday
+    const todayStr = today.toISOString().split('T')[0];
+    if (!perfectDaysSet.has(todayStr)) {
+      today.setDate(today.getDate() - 1);
+    }
+
+    while (true) {
+      const dateStr = today.toISOString().split('T')[0];
+
+      if (perfectDaysSet.has(dateStr)) {
+        streak++;
+        today.setDate(today.getDate() - 1);
+      } else {
+        break;
+      }
+    }
+
+    return streak;
+  }, [perfectDaysSet]);
 
   // --- Chart Data Preparation ---
   const habitChartData = {
@@ -284,250 +490,402 @@ const Tracker = ({ user }) => {
     <div className="min-h-screen bg-slate-50 p-4 md:p-8 text-slate-900 font-sans">
       <div className="max-w-[1400px] mx-auto space-y-6">
         
-        {/* Header & Month Selector */}
+        {/* Enhanced Header with Analytics Toggle */}
         <header className="flex flex-col md:flex-row md:items-center justify-between gap-4 bg-white p-6 rounded-2xl shadow-sm border border-slate-100">
           <div>
             <h1 className="text-2xl font-bold text-slate-800 tracking-tight">Habit & Task Master</h1>
-            <p className="text-slate-500 text-sm">Logging progress for the full month grid.</p>
+            <p className="text-slate-500 text-sm">
+              {isLoading 
+                ? 'Loading your progress...' 
+                : activeView === 'habits' 
+                  ? 'Logging progress for the full month grid.' 
+                  : 'Deep insights into your habit journey'
+              }
+            </p>
           </div>
-          <div className="flex items-center gap-3">
-            <div className="text-right">
-              <p className="text-sm font-semibold text-slate-700">{user.email}</p>
+          
+          <div className="flex items-center gap-4">
+            {/* View Toggle */}
+            <div className="bg-slate-100 p-1 rounded-lg flex">
+              <button
+                onClick={() => setActiveView('habits')}
+                className={`px-4 py-2 rounded-md text-sm font-medium transition-all ${
+                  activeView === 'habits' 
+                    ? 'bg-white text-slate-900 shadow-sm' 
+                    : 'text-slate-600 hover:text-slate-900'
+                }`}
+              >
+                Habits
+              </button>
+              <button
+                onClick={() => setActiveView('analytics')}
+                className={`px-4 py-2 rounded-md text-sm font-medium transition-all ${
+                  activeView === 'analytics' 
+                    ? 'bg-white text-slate-900 shadow-sm' 
+                    : 'text-slate-600 hover:text-slate-900'
+                }`}
+              >
+                Analytics
+              </button>
             </div>
-            <button 
-              onClick={handleLogout}
-              className="p-2 bg-slate-100 text-slate-600 rounded-lg hover:bg-red-100 hover:text-red-600 transition-all shadow-sm active:scale-95"
-            >
-              <LogOut className="w-5 h-5" />
-            </button>
+
+            {/* Enhanced Streak Display */}
+            {habits.length > 0 && (
+              <Card className="p-4 bg-gradient-to-r from-orange-50 to-red-50 border-orange-200" hover>
+                <p className="text-xs uppercase text-orange-600 font-bold tracking-widest">
+                  Current Streak
+                </p>
+                <p className="text-2xl font-black text-orange-500 flex items-center gap-1">
+                  🔥 <AnimatedCounter value={currentStreak} /> day{currentStreak !== 1 ? 's' : ''}
+                </p>
+              </Card>
+            )}
+            
+            <div className="flex items-center gap-3">
+              <Notifications habits={habits} />
+              
+              <div className="text-right">
+                <p className="text-sm font-semibold text-slate-700">{user.email}</p>
+                <div className="flex items-center justify-end gap-1 mt-1">
+                  {pendingUpdates.size > 0 && (
+                    <div className="flex items-center gap-1 text-xs text-orange-600">
+                      <LoadingSpinner size="small" />
+                      <span>Syncing...</span>
+                    </div>
+                  )}
+                  <div className={`w-2 h-2 rounded-full ${isOnline ? 'bg-green-500' : 'bg-red-500'}`} />
+                </div>
+              </div>
+              
+              <Button 
+                onClick={handleLogout}
+                variant="secondary"
+                size="small"
+                className="p-2"
+              >
+                <LogOut className="w-5 h-5" />
+              </Button>
+            </div>
           </div>
         </header>
 
-        <div className="grid grid-cols-1 xl:grid-cols-4 gap-6">
-          
-          {/* Habits Section - Now takes more width for the grid */}
-          <section className="xl:col-span-3 space-y-6">
-            <div className="bg-white rounded-2xl shadow-sm border border-slate-100 overflow-hidden">
-              <div className="p-6 border-b border-slate-50 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-                <h2 className="text-lg font-bold flex items-center gap-2">
-                  <Target className="w-5 h-5 text-blue-500" />
-                  Monthly Habit Grid
-                </h2>
-                <div className="flex gap-2">
-                  <input 
-                    type="text" 
-                    placeholder="New habit..."
-                    value={newHabitName}
-                    onChange={(e) => setNewHabitName(e.target.value)}
-                    onKeyDown={(e) => e.key === 'Enter' && addHabit()}
-                    className="text-sm px-4 py-2 border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 w-full sm:w-48 bg-slate-50"
-                  />
-                  <button 
-                    onClick={addHabit}
-                    className="p-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-all shadow-sm active:scale-95"
-                  >
-                    <Plus className="w-5 h-5" />
-                  </button>
+        {/* Main Content Area */}
+        {activeView === 'analytics' ? (
+          <Analytics 
+            habits={habits}
+            habitLogs={habitLogs}
+            perfectDaysSet={perfectDaysSet}
+            currentStreak={currentStreak}
+          />
+        ) : (
+          <div className="grid grid-cols-1 xl:grid-cols-4 gap-6">
+            
+            {/* Enhanced Habits Section */}
+            <section className="xl:col-span-3 space-y-6">
+              <Card className="overflow-hidden" loading={isLoading}>
+                <div className="p-6 border-b border-slate-50 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+                  <h2 className="text-lg font-bold flex items-center gap-2">
+                    <Target className="w-5 h-5 text-blue-500" />
+                    Monthly Habit Grid
+                    {habits.length > 0 && (
+                      <span className="text-sm font-normal text-slate-500">
+                        ({habits.length} habit{habits.length !== 1 ? 's' : ''})
+                      </span>
+                    )}
+                  </h2>
+                  <div className="flex gap-2">
+                    <input 
+                      type="text" 
+                      placeholder="New habit..."
+                      value={newHabitName}
+                      onChange={(e) => setNewHabitName(e.target.value)}
+                      onKeyDown={(e) => e.key === 'Enter' && addHabit()}
+                      className="text-sm px-4 py-2 border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 w-full sm:w-48 bg-slate-50"
+                      disabled={isLoading}
+                    />
+                    <Button 
+                      onClick={addHabit}
+                      loading={pendingUpdates.has(`temp-${Date.now()}`)}
+                      disabled={isLoading || !newHabitName.trim()}
+                    >
+                      <Plus className="w-5 h-5" />
+                    </Button>
+                  </div>
                 </div>
-              </div>
 
-              {habits.length === 0 ? (
-                <div className="text-center py-20 bg-slate-50/50">
-                  <p className="text-slate-400 font-medium">Your habit grid is empty.</p>
-                  <p className="text-slate-300 text-xs mt-1">Add a habit to see the full month calendar.</p>
-                </div>
-              ) : (
-                <div className="overflow-x-auto overflow-y-visible">
-                  <table className="w-full text-left border-collapse table-fixed min-w-[1000px]">
-                    <thead>
-                      <tr className="bg-slate-50/50">
-                        <th className="sticky left-0 z-20 bg-white p-4 font-semibold text-slate-400 text-[10px] uppercase tracking-wider w-48 shadow-[2px_0_5px_rgba(0,0,0,0.02)] border-b border-slate-100">
-                          Habit
-                        </th>
-                        {daysArray.map(day => (
-                          <th key={day} className="p-2 font-bold text-slate-400 text-[10px] text-center w-8 border-l border-slate-100 border-b border-slate-100">
-                            {day}
+                {isLoading ? (
+                  <div className="p-8">
+                    <LoadingSpinner size="large" className="mx-auto mb-4" />
+                    <p className="text-center text-slate-500">Loading your habits...</p>
+                  </div>
+                ) : habits.length === 0 ? (
+                  <div className="text-center py-20 bg-slate-50/50">
+                    <Target className="w-12 h-12 text-slate-300 mx-auto mb-4" />
+                    <p className="text-slate-400 font-medium">Your habit grid is empty.</p>
+                    <p className="text-slate-300 text-xs mt-1">Add a habit to see the full month calendar.</p>
+                  </div>
+                ) : (
+                  <div className="overflow-x-auto overflow-y-visible">
+                    <table className="w-full text-left border-collapse table-fixed min-w-[1000px]">
+                      <thead>
+                        <tr className="bg-slate-50/50">
+                          <th className="sticky left-0 z-20 bg-white p-4 font-semibold text-slate-400 text-[10px] uppercase tracking-wider w-48 shadow-[2px_0_5px_rgba(0,0,0,0.02)] border-b border-slate-100">
+                            Habit
                           </th>
-                        ))}
-                        <th className="p-4 font-semibold text-slate-400 text-[10px] uppercase tracking-wider text-right w-24 border-b border-slate-100">
-                          Score
-                        </th>
-                        <th className="p-4 w-12 border-b border-slate-100"></th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {(habits || []).map(habit => habit ? (
-                        <tr key={habit.id} className="group hover:bg-blue-50/30 transition-colors border-b border-slate-100 last:border-0">
-                          <td className="sticky left-0 z-20 bg-white p-4 font-semibold text-slate-700 truncate shadow-[2px_0_5px_rgba(0,0,0,0.02)] group-hover:bg-blue-50/30 transition-colors">
-                            {habit.name}
-                          </td>
                           {daysArray.map(day => (
-                            <td key={day} className="p-1 border-l border-slate-100">
-                              <button
-                                onClick={() => toggleHabit(habit.id, day)}
-                                className={`w-full aspect-square flex items-center justify-center rounded-sm transition-all border-2
-                                  ${isHabitCompleted(habit.id, day)
-                                    ? 'bg-blue-600 text-white border-blue-700' 
-                                    : 'bg-white hover:bg-slate-100 text-transparent border-slate-400'}`}
-                              >
-                                <Check className={`w-3 h-3 ${isHabitCompleted(habit.id, day) ? 'opacity-100' : 'opacity-0'}`} />
-                              </button>
-                            </td>
+                            <th key={day} className="p-2 font-bold text-slate-400 text-[10px] text-center w-8 border-l border-slate-100 border-b border-slate-100">
+                              {day}
+                            </th>
                           ))}
-                          <td className="p-4 text-right">
-                            <div className="flex flex-col items-end">
-                              <span className="text-[11px] font-bold text-blue-600">{getHabitProgress(habit)}%</span>
-                              <div className="w-12 h-1 bg-slate-200 rounded-full mt-1 overflow-hidden">
-                                <div 
-                                  className="h-full bg-blue-500" 
-                                  style={{ width: `${getHabitProgress(habit)}%` }}
+                          <th className="p-4 font-semibold text-slate-400 text-[10px] uppercase tracking-wider text-right w-24 border-b border-slate-100">
+                            Progress
+                          </th>
+                          <th className="p-4 w-12 border-b border-slate-100"></th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {habits.map(habit => habit ? (
+                          <tr key={habit.id} className={`group hover:bg-blue-50/30 transition-colors border-b border-slate-100 last:border-0 ${
+                            pendingUpdates.has(`delete-${habit.id}`) ? 'opacity-50' : ''
+                          }`}>
+                            <td className="sticky left-0 z-20 bg-white p-4 font-semibold text-slate-700 truncate shadow-[2px_0_5px_rgba(0,0,0,0.02)] group-hover:bg-blue-50/30 transition-colors">
+                              <div className="flex items-center gap-2">
+                                {habit.name}
+                                {habit.id?.toString().startsWith('temp-') && (
+                                  <LoadingSpinner size="small" className="text-blue-500" />
+                                )}
+                              </div>
+                            </td>
+                            {daysArray.map(day => {
+                              const isCompleted = isHabitCompleted(habit.id, day);
+                              const isPending = pendingUpdates.has(`${habit.id}-${currentMonth.split('-').map(Number)[0]}-${currentMonth.split('-').map(Number)[1].toString().padStart(2, '0')}-${day.toString().padStart(2, '0')}`);
+                              
+                              return (
+                                <td key={day} className="p-1 border-l border-slate-100">
+                                  <button
+                                    onClick={() => toggleHabit(habit.id, day)}
+                                    disabled={isPending || habit.id?.toString().startsWith('temp-')}
+                                    className={`w-full aspect-square flex items-center justify-center rounded-sm transition-all border-2 relative
+                                      ${isCompleted
+                                        ? 'bg-blue-600 text-white border-blue-700' 
+                                        : 'bg-white hover:bg-slate-100 text-transparent border-slate-400 hover:border-slate-500'
+                                      } ${isPending ? 'opacity-50' : ''}`}
+                                  >
+                                    {isPending ? (
+                                      <LoadingSpinner size="small" />
+                                    ) : (
+                                      <Check className={`w-3 h-3 ${isCompleted ? 'opacity-100' : 'opacity-0'}`} />
+                                    )}
+                                  </button>
+                                </td>
+                              );
+                            })}
+                            <td className="p-4 text-right">
+                              <div className="flex flex-col items-end">
+                                <AnimatedCounter 
+                                  value={getHabitProgress(habit)} 
+                                  className="text-[11px] font-bold text-blue-600"
+                                />
+                                <span className="text-[11px] text-blue-600">%</span>
+                                <ProgressBar
+                                  value={getHabitProgress(habit)}
+                                  max={100}
+                                  className="w-12 h-1 mt-1"
+                                  color="blue"
+                                  animate={pendingUpdates.size > 0}
                                 />
                               </div>
-                            </div>
-                          </td>
-                          <td className="p-4 text-right">
-                            <button 
-                              onClick={() => deleteHabit(habit.id)}
-                              className="p-1 text-slate-400 hover:text-red-500 transition-colors"
-                            >
-                              <Trash2 className="w-4 h-4" />
-                            </button>
-                          </td>
-                        </tr>
-                      ) : null)}
-                    </tbody>
-                  </table>
-                </div>
-              )}
-            </div>
-
-            {/* Habit Visual Chart */}
-            <div className="bg-white p-6 rounded-2xl shadow-sm border border-slate-100">
-              <div className="flex items-center gap-2 mb-6">
-                <TrendingUp className="w-4 h-4 text-blue-500" />
-                <h3 className="text-sm font-bold text-slate-500 uppercase tracking-widest">Performance Over Time</h3>
-              </div>
-              <div className="h-64">
-                <Line data={habitChartData} options={chartOptions} />
-              </div>
-            </div>
-          </section>
-
-          {/* To-Do List Section */}
-          <section className="space-y-6">
-            <div className="bg-white p-6 rounded-2xl shadow-sm border border-slate-100 h-full flex flex-col">
-              <div className="mb-6">
-                <h2 className="text-lg font-bold flex items-center gap-2">
-                  <ClipboardList className="w-5 h-5 text-emerald-500" />
-                  To-Do List
-                </h2>
-                <p className="text-xs text-slate-400 mt-1">One-off tasks for this month.</p>
-              </div>
-
-              <div className="flex gap-2 mb-6">
-                <input 
-                  type="text" 
-                  placeholder="New task..."
-                  value={newTaskName}
-                  onChange={(e) => setNewTaskName(e.target.value)}
-                  onKeyDown={(e) => e.key === 'Enter' && addTask()}
-                  className="flex-1 text-sm px-4 py-2 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-emerald-500 bg-slate-50 placeholder-slate-400"
-                />
-                <button 
-                  onClick={addTask}
-                  className="p-2 bg-emerald-600 text-white rounded-lg hover:bg-emerald-700 transition-all shadow-sm active:scale-95"
-                >
-                  <Plus className="w-5 h-5" />
-                </button>
-              </div>
-
-              <div className="flex-1 space-y-2 overflow-y-auto max-h-[400px] mb-6 pr-1 custom-scrollbar">
-                {tasks.length === 0 ? (
-                  <div className="text-center py-10 bg-slate-50 rounded-xl border border-dashed border-slate-200">
-                    <p className="text-slate-400 text-sm">List is empty.</p>
+                            </td>
+                            <td className="p-4 text-right">
+                              <Button
+                                onClick={() => deleteHabit(habit.id)}
+                                variant="secondary"
+                                size="small"
+                                loading={pendingUpdates.has(`delete-${habit.id}`)}
+                                disabled={habit.id?.toString().startsWith('temp-')}
+                                className="p-1 text-slate-400 hover:text-red-500 bg-transparent border-0 shadow-none"
+                              >
+                                <Trash2 className="w-4 h-4" />
+                              </Button>
+                            </td>
+                          </tr>
+                        ) : null)}
+                      </tbody>
+                    </table>
                   </div>
-                                ) : (
-                  (tasks || []).map(task => task ? (
-                    <div 
-                      key={task.id} 
-                      className="group flex items-center justify-between p-3 bg-white border border-slate-200 rounded-xl hover:shadow-md transition-all"
-                    >
-                      <button 
-                        onClick={() => toggleTask(task.id)}
-                        className="flex items-center gap-3 flex-1 text-left"
-                      >
-                        {task.completed ? (
-                          <CheckCircle2 className="w-5 h-5 text-emerald-600 shadow-sm rounded-full" />
-                        ) : (
-                          <div className="w-5 h-5 border-2 border-slate-500 rounded-full group-hover:border-emerald-500 transition-colors bg-white" />
-                        )}
-                        <span className={`text-sm font-semibold transition-all ${task.completed ? 'text-slate-400 line-through' : 'text-slate-700'}`}>
-                          {task.name}
-                        </span>
-                      </button>
-                      <button 
-                        onClick={() => deleteTask(task.id)}
-                        className="p-1 text-slate-300 hover:text-red-500 opacity-0 group-hover:opacity-100 transition-all"
-                      >
-                        <Trash2 className="w-4 h-4" />
-                      </button>
-                    </div>
-                  ) : null)
                 )}
-              </div>
+              </Card>
 
-              {/* Task Pie Chart & Stats */}
-              <div className="pt-6 border-t border-slate-100 space-y-4">
-                <div className="flex justify-between items-center text-xs font-bold text-slate-400 uppercase tracking-widest mb-2">
-                  <span className="flex items-center gap-2"><PieIcon className="w-4 h-4" /> Completion</span>
-                  <span className="bg-slate-100 px-2 py-0.5 rounded text-slate-600 font-mono">{completedTasks}/{tasks.length}</span>
-                </div>
-                
-                <div className="relative h-48 flex items-center justify-center">
-                  <Pie 
-                    data={taskPieData} 
-                    options={{
-                      responsive: true,
-                      maintainAspectRatio: false,
-                      plugins: { 
-                        legend: { position: 'bottom', labels: { boxWidth: 10, font: { size: 10, weight: 'bold' } } },
-                        tooltip: { enabled: tasks.length > 0 }
-                      },
-                      cutout: '75%'
-                    }} 
-                  />
-                  {tasks.length > 0 && (
-                    <div className="absolute inset-0 flex flex-col items-center justify-center pointer-events-none mt-[-20px]">
-                      <span className="text-2xl font-black text-slate-700">
-                        {Math.round((completedTasks / tasks.length) * 100)}%
-                      </span>
+              {/* Enhanced Performance Chart */}
+              {!isLoading && habits.length > 0 && (
+                <Card>
+                  <div className="p-6">
+                    <div className="flex items-center gap-2 mb-6">
+                      <TrendingUp className="w-4 h-4 text-blue-500" />
+                      <h3 className="text-sm font-bold text-slate-500 uppercase tracking-widest">Performance Over Time</h3>
+                    </div>
+                    <div className="h-64">
+                      <Line data={habitChartData} options={chartOptions} />
+                    </div>
+                  </div>
+                </Card>
+              )}
+            </section>
+
+            {/* Enhanced To-Do List Section */}
+            <section className="space-y-6">
+              <Card className="h-full flex flex-col" loading={isLoading}>
+                <div className="p-6">
+                  <div className="mb-6">
+                    <h2 className="text-lg font-bold flex items-center gap-2">
+                      <ClipboardList className="w-5 h-5 text-emerald-500" />
+                      To-Do List
+                      {tasks.length > 0 && (
+                        <span className="text-sm font-normal text-slate-500">
+                          ({completedTasks}/{tasks.length})
+                        </span>
+                      )}
+                    </h2>
+                    <p className="text-xs text-slate-400 mt-1">One-off tasks for this month.</p>
+                  </div>
+
+                  <div className="flex gap-2 mb-6">
+                    <input 
+                      type="text" 
+                      placeholder="New task..."
+                      value={newTaskName}
+                      onChange={(e) => setNewTaskName(e.target.value)}
+                      onKeyDown={(e) => e.key === 'Enter' && addTask()}
+                      className="flex-1 text-sm px-4 py-2 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-emerald-500 bg-slate-50 placeholder-slate-400"
+                      disabled={isLoading}
+                    />
+                    <Button 
+                      onClick={addTask}
+                      variant="success"
+                      loading={pendingUpdates.has(`temp-task-${Date.now()}`)}
+                      disabled={isLoading || !newTaskName.trim()}
+                    >
+                      <Plus className="w-5 h-5" />
+                    </Button>
+                  </div>
+
+                  <div className="flex-1 space-y-2 overflow-y-auto max-h-[400px] mb-6 pr-1 custom-scrollbar">
+                    {isLoading ? (
+                      <div className="space-y-2">
+                        {Array.from({ length: 3 }).map((_, i) => (
+                          <div key={i} className="p-3 bg-slate-50 rounded-xl border border-slate-200">
+                            <div className="animate-pulse flex items-center gap-3">
+                              <div className="w-5 h-5 bg-slate-200 rounded-full" />
+                              <div className="flex-1 h-4 bg-slate-200 rounded" />
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    ) : tasks.length === 0 ? (
+                      <div className="text-center py-10 bg-slate-50 rounded-xl border border-dashed border-slate-200">
+                        <ClipboardList className="w-8 h-8 text-slate-300 mx-auto mb-2" />
+                        <p className="text-slate-400 text-sm">List is empty.</p>
+                      </div>
+                    ) : (
+                      tasks.map(task => task ? (
+                        <div 
+                          key={task.id} 
+                          className={`group flex items-center justify-between p-3 bg-white border border-slate-200 rounded-xl hover:shadow-md transition-all ${
+                            pendingUpdates.has(`task-${task.id}`) || pendingUpdates.has(`delete-task-${task.id}`) ? 'opacity-50' : ''
+                          }`}
+                        >
+                          <button 
+                            onClick={() => toggleTask(task.id)}
+                            className="flex items-center gap-3 flex-1 text-left"
+                            disabled={pendingUpdates.has(`task-${task.id}`) || task.id?.toString().startsWith('temp-task-')}
+                          >
+                            {pendingUpdates.has(`task-${task.id}`) ? (
+                              <LoadingSpinner size="small" className="text-emerald-600" />
+                            ) : task.completed ? (
+                              <CheckCircle2 className="w-5 h-5 text-emerald-600 shadow-sm rounded-full" />
+                            ) : (
+                              <div className="w-5 h-5 border-2 border-slate-500 rounded-full group-hover:border-emerald-500 transition-colors bg-white" />
+                            )}
+                            <div className="flex items-center gap-2 flex-1">
+                              <span className={`text-sm font-semibold transition-all ${
+                                task.completed ? 'text-slate-400 line-through' : 'text-slate-700'
+                              }`}>
+                                {task.name}
+                              </span>
+                              {task.id?.toString().startsWith('temp-task-') && (
+                                <LoadingSpinner size="small" className="text-blue-500" />
+                              )}
+                            </div>
+                          </button>
+                          <Button
+                            onClick={() => deleteTask(task.id)}
+                            variant="secondary"
+                            size="small"
+                            loading={pendingUpdates.has(`delete-task-${task.id}`)}
+                            disabled={task.id?.toString().startsWith('temp-task-')}
+                            className="p-1 text-slate-300 hover:text-red-500 opacity-0 group-hover:opacity-100 transition-all bg-transparent border-0 shadow-none"
+                          >
+                            <Trash2 className="w-4 h-4" />
+                          </Button>
+                        </div>
+                      ) : null)
+                    )}
+                  </div>
+
+                  {/* Enhanced Task Stats with Animation */}
+                  {!isLoading && (
+                    <div className="pt-6 border-t border-slate-100 space-y-4">
+                      <div className="flex justify-between items-center text-xs font-bold text-slate-400 uppercase tracking-widest mb-2">
+                        <span className="flex items-center gap-2">
+                          <PieIcon className="w-4 h-4" /> 
+                          Completion
+                        </span>
+                        <span className="bg-slate-100 px-2 py-0.5 rounded text-slate-600 font-mono">
+                          <AnimatedCounter value={completedTasks} />/<AnimatedCounter value={tasks.length} />
+                        </span>
+                      </div>
+                      
+                      <div className="relative h-48 flex items-center justify-center">
+                        <Pie 
+                          data={taskPieData} 
+                          options={{
+                            responsive: true,
+                            maintainAspectRatio: false,
+                            plugins: { 
+                              legend: { position: 'bottom', labels: { boxWidth: 10, font: { size: 10, weight: 'bold' } } },
+                              tooltip: { enabled: tasks.length > 0 }
+                            },
+                            cutout: '75%'
+                          }} 
+                        />
+                        {tasks.length > 0 && (
+                          <div className="absolute inset-0 flex flex-col items-center justify-center pointer-events-none mt-[-20px]">
+                            <AnimatedCounter 
+                              value={Math.round((completedTasks / tasks.length) * 100)}
+                              className="text-2xl font-black text-slate-700"
+                            />
+                            <span className="text-2xl font-black text-slate-700">%</span>
+                          </div>
+                        )}
+                      </div>
                     </div>
                   )}
                 </div>
-              </div>
-            </div>
-          </section>
+              </Card>
+            </section>
 
-        </div>
+          </div>
+        )}
+
+        {/* Global UI Components */}
+        <ConnectionStatus isOnline={connectionMonitor?.isOnline} />
+        <ToastContainer />
       </div>
-      
-      {/* Custom Global Styles */}
-      <style dangerouslySetInnerHTML={{ __html: `
-        .scrollbar-hide::-webkit-scrollbar { display: none; }
-        .scrollbar-hide { -ms-overflow-style: none; scrollbar-width: none; }
-        .custom-scrollbar::-webkit-scrollbar { width: 4px; }
-        .custom-scrollbar::-webkit-scrollbar-track { background: transparent; }
-        .custom-scrollbar::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 10px; }
-        
-        /* Ensure table header sticks and columns don't collapse */
-        table { border-spacing: 0; }
-        th, td { white-space: nowrap; }
-      `}} />
     </div>
   );
 }
 
-const App = () => {
+const MainApp = () => {
   const [user, setUser] = useState(null);
   const [loading, setLoading] = useState(true);
 
@@ -552,13 +910,29 @@ const App = () => {
   }, []);
 
   if (loading) {
-    return <div className="min-h-screen bg-slate-100 flex items-center justify-center"><p>Loading...</p></div>;
+    return (
+      <div className="min-h-screen bg-slate-100 flex items-center justify-center">
+        <div className="text-center">
+          <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-500 mx-auto mb-4"></div>
+          <p className="text-slate-500">Loading your habits...</p>
+        </div>
+      </div>
+    );
   }
 
   return (
     <div>
       {!user ? <Auth /> : <Tracker user={user} />}
     </div>
+  );
+};
+
+const App = () => {
+  return (
+    <Routes>
+      <Route path="/" element={<MainApp />} />
+      <Route path="/reset-password" element={<ResetPassword />} />
+    </Routes>
   );
 };
 

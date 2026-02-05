@@ -11,11 +11,12 @@
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.93.3",
-    "chart.js": "^4.4.1",
+    "chart.js": "^4.5.1",
     "lucide-react": "^0.323.0",
     "react": "^18.2.0",
-    "react-chartjs-2": "^5.2.0",
-    "react-dom": "^18.2.0"
+    "react-chartjs-2": "^5.3.1",
+    "react-dom": "^18.2.0",
+    "react-router-dom": "^7.13.0"
   },
   "devDependencies": {
     "@types/react": "^18.2.55",
