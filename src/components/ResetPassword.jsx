@@ -42,32 +42,22 @@ export default function ResetPassword() {
       refreshToken = hashParams.get('refresh_token');
     }
     
-    console.log('URL Check:', { 
-      hash, 
-      search: window.location.search, 
-      accessToken: accessToken ? 'found' : 'missing',
-      refreshToken: refreshToken ? 'found' : 'missing'
-    });
+
 
     if (accessToken && refreshToken) {
-      console.log('Setting session with tokens...');
       // Set the session from URL params (from email link)
       supabase.auth.setSession({
         access_token: accessToken,
         refresh_token: refreshToken,
       }).then(({ data, error }) => {
         if (error) {
-          console.error('Session error:', error);
           setError('Invalid or expired reset link. Please request a new one.');
         } else {
-          console.log('Session set successfully:', data);
           setStep('password');
           // Clear URL params for security
           window.history.replaceState({}, document.title, window.location.pathname);
         }
       });
-    } else {
-      console.log('No tokens found, showing email form');
     }
   }, [searchParams]);
 
@@ -82,13 +72,24 @@ export default function ResetPassword() {
         redirectTo: `${window.location.origin}/reset-password`,
       });
 
-      if (error) throw error;
+      if (error) {
+        // Clean error handling for reset password
+        if (error.message?.includes('Email rate limit exceeded')) {
+          setError('You can only request a password reset once per minute. Please wait before trying again.');
+        } else if (error.message?.includes('User not found')) {
+          setError('No account found with this email address. Please check your email or create a new account.');
+        } else if (error.message?.includes('For security purposes')) {
+          setError('A password reset email was sent if an account exists with this email. Please check your inbox.');
+        } else {
+          setError('Unable to send reset email. Please check your email address and try again.');
+        }
+        setLoading(false);
+        return;
+      }
       
       setSuccess('Password reset email sent! Check your inbox and click the link to continue. The link will redirect you back here to set your new password.');
-      console.log('Reset email sent successfully');
     } catch (err) {
-      console.error('Reset email error:', err);
-      setError(err.message || 'Failed to send reset email. Please check if the email is registered.');
+      setError('Unable to send reset email. Please try again.');
     } finally {
       setLoading(false);
     }
@@ -117,14 +118,25 @@ export default function ResetPassword() {
         password: password
       });
 
-      if (error) throw error;
+      if (error) {
+        // Clean error handling for password update
+        if (error.message?.includes('session not found') || error.message?.includes('JWT expired')) {
+          setError('Your password reset link has expired. Please request a new one.');
+        } else if (error.message?.includes('same password')) {
+          setError('New password must be different from your current password.');
+        } else {
+          setError('Unable to update password. Please try again or request a new reset link.');
+        }
+        setLoading(false);
+        return;
+      }
       
       setSuccess('Password updated successfully! Redirecting to login...');
       setTimeout(() => {
         navigate('/');
       }, 2000);
     } catch (err) {
-      setError(err.message || 'Failed to update password. Please try again.');
+      setError('Unable to update password. Please try again or request a new reset link.');
     } finally {
       setLoading(false);
     }

@@ -211,6 +211,10 @@ const Tracker = ({ user }) => {
   // --- Enhanced Action Handlers ---
   const addHabit = async () => {
     if (!newHabitName.trim()) return;
+    if (newHabitName.length > 100) {
+      if (window.showToast) window.showToast('Habit name must be 100 characters or less', 'error');
+      return;
+    }
     
     const tempId = `temp-${Date.now()}`;
     const tempHabit = { id: tempId, name: newHabitName, user_id: user.id };
@@ -226,7 +230,10 @@ const Tracker = ({ user }) => {
     } catch (error) {
       console.error('Error adding habit:', error);
       setHabits(prev => prev.filter(h => h.id !== tempId));
-      if (window.showToast) window.showToast('Failed to add habit', 'error');
+      const errorMessage = error.message?.includes('Maximum of') 
+        ? error.message 
+        : 'Failed to add habit';
+      if (window.showToast) window.showToast(errorMessage, 'error');
     } finally {
       setPendingUpdates(prev => { const next = new Set(prev); next.delete(tempId); return next; });
     }
@@ -293,6 +300,10 @@ const Tracker = ({ user }) => {
 
   const addTask = async () => {
     if (!newTaskName.trim()) return;
+    if (newTaskName.length > 200) {
+      if (window.showToast) window.showToast('Task name must be 200 characters or less', 'error');
+      return;
+    }
     
     const tempId = `temp-task-${Date.now()}`;
     const tempTask = { id: tempId, name: newTaskName, title: newTaskName, completed: false };
@@ -310,7 +321,10 @@ const Tracker = ({ user }) => {
       console.error('Error adding task:', error);
       if (isOnline) {
         setTasks(prev => prev.filter(t => t.id !== tempId));
-        if (window.showToast) window.showToast('Failed to add task', 'error');
+        const errorMessage = error.message?.includes('Maximum of') 
+          ? error.message 
+          : 'Failed to add task';
+        if (window.showToast) window.showToast(errorMessage, 'error');
       } else {
         if (window.showToast) window.showToast('Task saved locally - will sync when online', 'info');
         setNewTaskName('');
@@ -608,6 +622,7 @@ const Tracker = ({ user }) => {
                       onKeyDown={(e) => e.key === 'Enter' && addHabit()}
                       className="text-sm px-4 py-2 border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 w-full sm:w-48 bg-slate-50"
                       disabled={isLoading}
+                      maxLength="100"
                     />
                     <Button 
                       onClick={addHabit}
@@ -764,6 +779,7 @@ const Tracker = ({ user }) => {
                       onKeyDown={(e) => e.key === 'Enter' && addTask()}
                       className="flex-1 text-sm px-4 py-2 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-emerald-500 bg-slate-50 placeholder-slate-400"
                       disabled={isLoading}
+                      maxLength="200"
                     />
                     <Button 
                       onClick={addTask}
@@ -886,6 +902,14 @@ const Tracker = ({ user }) => {
         {/* Global UI Components */}
         <ConnectionStatus isOnline={connectionMonitor?.isOnline} />
         <ToastContainer />
+        
+        {/* Personal Branding Footer */}
+        <div className="mt-8 text-center">
+          <div className="inline-flex items-center gap-2 px-4 py-2 bg-gradient-to-r from-blue-50 to-purple-50 border border-blue-100 rounded-full text-sm text-slate-600">
+            <span className="text-blue-500">🚀</span>
+            <span>Built by <span className="font-semibold text-slate-800">Guru</span> — Feedback welcome</span>
+          </div>
+        </div>
       </div>
     </div>
   );

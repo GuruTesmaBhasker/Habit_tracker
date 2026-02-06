@@ -55,12 +55,38 @@ const Auth = () => {
     try {
       if (isLogin) {
         const { error } = await supabase.auth.signInWithPassword({ email, password });
-        if (error) throw error;
+        if (error) {
+          // Clean error handling for login
+          if (error.message?.includes('Invalid login credentials')) {
+            setError('Invalid email or password. Please check your credentials and try again.');
+          } else if (error.message?.includes('Email not confirmed')) {
+            setError('Please confirm your email address before signing in. Check your inbox for the confirmation link.');
+          } else if (error.message?.includes('Email rate limit exceeded')) {
+            setError('Too many attempts. Please wait a few minutes before trying again.');
+          } else if (error.message?.includes('signup disabled')) {
+            setError('New registrations are temporarily disabled. Please try again later.');
+          } else {
+            setError('Unable to sign in. Please check your credentials and try again.');
+          }
+          setLoading(false);
+          return;
+        }
       } else {
         const { data, error } = await supabase.auth.signUp({ email, password });
         
         if (error) {
-          setError(error.message);
+          // Clean error handling for signup
+          if (error.message?.includes('User already registered')) {
+            setError("This email is already registered. Please sign in instead.");
+          } else if (error.message?.includes('signup disabled')) {
+            setError('New registrations are temporarily disabled. Please try again later.');
+          } else if (error.message?.includes('Email rate limit exceeded')) {
+            setError('Too many email attempts. Please wait a few minutes before trying again.');
+          } else if (error.message?.includes('Invalid email')) {
+            setError('Please enter a valid email address.');
+          } else {
+            setError('Unable to create account. Please try again.');
+          }
           setLoading(false);
           return;
         }
@@ -77,15 +103,12 @@ const Auth = () => {
         }
       }
     } catch (err) {
-      // Handle login errors
-      if (isLogin && (
-        err.message?.includes('Invalid login credentials') ||
-        err.message?.includes('Email not confirmed') ||
-        err.message?.includes('Invalid email or password')
-      )) {
-        setError('Invalid email or password. Please check your credentials and try again.');
+      // Final fallback for any unexpected errors
+      console.error('Auth error:', err);
+      if (isLogin) {
+        setError('Unable to sign in. Please check your credentials and try again.');
       } else {
-        setError(err.message || 'An authentication error occurred.');
+        setError('Unable to create account. Please try again.');
       }
     } finally {
       setLoading(false);
@@ -283,15 +306,15 @@ const Auth = () => {
             <div className="mt-8 grid grid-cols-2 gap-4">
               <button 
                 type="button"
-                onClick={() => setError('Social auth coming soon!')}
-                className="flex items-center justify-center gap-3 py-3.5 px-4 border border-slate-200 rounded-2xl hover:bg-slate-50 hover:border-slate-300 transition-all font-bold text-slate-700 text-sm shadow-sm active:scale-95"
+                disabled
+                className="flex items-center justify-center gap-3 py-3.5 px-4 border border-slate-200 rounded-2xl bg-slate-50 transition-all font-bold text-slate-400 text-sm shadow-sm cursor-not-allowed"
               >
                 <Chrome className="w-5 h-5" /> Google
               </button>
               <button 
                 type="button"
-                onClick={() => setError('Social auth coming soon!')}
-                className="flex items-center justify-center gap-3 py-3.5 px-4 border border-slate-200 rounded-2xl hover:bg-slate-50 hover:border-slate-300 transition-all font-bold text-slate-700 text-sm shadow-sm active:scale-95"
+                disabled
+                className="flex items-center justify-center gap-3 py-3.5 px-4 border border-slate-200 rounded-2xl bg-slate-50 transition-all font-bold text-slate-400 text-sm shadow-sm cursor-not-allowed"
               >
                 <Github className="w-5 h-5" /> GitHub
               </button>
